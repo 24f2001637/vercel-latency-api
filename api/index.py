@@ -18,6 +18,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 with open(BASE_DIR / "q-vercel-latency.json", "r") as f:
     telemetry = json.load(f)
 
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.options("/")
+async def options_root():
+    response = Response(status_code=200)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 @app.post("/")
 def analyze(data: dict):
 
