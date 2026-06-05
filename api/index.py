@@ -1,28 +1,13 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pathlib import Path
 import json
 import numpy as np
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST"],
-    allow_headers=["*"]
-)
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-with open(BASE_DIR / "q-vercel-latency.json", "r") as f:
-    telemetry = json.load(f)
-
-from fastapi import FastAPI, Response
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()
-
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,6 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Load telemetry data
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+with open(BASE_DIR / "q-vercel-latency.json", "r") as f:
+    telemetry = json.load(f)
+
+# Handle CORS preflight
 @app.options("/")
 async def options_root():
     response = Response(status_code=200)
@@ -39,7 +31,7 @@ async def options_root():
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
-
+# Main endpoint
 @app.post("/")
 def analyze(data: dict):
 
@@ -68,4 +60,11 @@ def analyze(data: dict):
             )
         }
 
-    return result
+    return JSONResponse(
+        content=result,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )
