@@ -1,70 +1,77 @@
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pathlib import Path
+from pydantic import BaseModel
+from typing import List
 import json
-import numpy as np
+import os
 
+# 1. Setup the app
 app = FastAPI()
 
-# CORS
+# 2. Add CORS (The "Bouncer")
+# This allows dashboards from any website to ask your API for data safely.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origins=["*"], # Allows all origins
+    allow_methods=["POST"], # Only allows POST requests
     allow_headers=["*"],
 )
 
-# Load telemetry data
-BASE_DIR = Path(__file__).resolve().parent.parent
+# 3. Define what the incoming request looks like
+class AnalyticsRequest(BaseModel):
+    regions: List[str]
+    threshold_ms: float
 
-with open(BASE_DIR / "q-vercel-latency.json", "r") as f:
-    telemetry = json.load(f)
+# 4. Load the JSON data
+# We do this carefully so Vercel can find the file in the cloud
+current_dir = os.path.dirname(os.path.realpath(__file__))
+root_dir = os.path.dirname(current_dir)
+file_path = os.path.join(root_dir, 'q-vercel-latency.json')
 
-# Handle CORS preflight
-@app.options("/")
-async def options_root():
-    response = Response(status_code=200)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+with open(file_path, 'r') as f:
+    telemetry_data = json.load(f)
 
-# Main endpoint
+# 5. Create the POST Endpoint
 @app.post("/")
-def analyze(data: dict):
-
-    regions = data["regions"]
-    threshold = data["threshold_ms"]
-
-    result = {}
-
-    for region in regions:
-
-        records = [
-            r for r in telemetry
-            if r["region"] == region
-        ]
-
-        latencies = [r["latency_ms"] for r in records]
-        uptimes = [r["uptime_pct"] for r in records]
-
-        result[region] = {
-            "avg_latency": round(sum(latencies) / len(latencies), 2),
-            "p95_latency": round(np.percentile(latencies, 95), 2),
-            "avg_uptime": round(sum(uptimes) / len(uptimes), 3),
-            "breaches": sum(
-                1 for x in latencies
-                if x > threshold
-            )
+def get_metrics(request: AnalyticsRequest):
+    results = {}
+    
+    # Loop through each region they asked for
+    for target_region in request.regions:
+        # Filter the data for just this region
+        region_records = [d for d in telemetry_data if d.get("region") == target_region]
+        
+        if not region_records:
+            continue
+            
+        # Extract lists of just the numbers we need
+        latencies = [d["latency"] for d in region_records]
+        uptimes = [d["uptime"] for d in region_records]
+        
+        # Calculate Averages (Mean)
+        avg_latency = sum(latencies) / len(latencies)
+        avg_uptime = sum(uptimes) / len(uptimes)
+        
+        # Calculate Breaches (How many times was latency > threshold?)
+        breaches = sum(1 for lat in latencies if lat > request.threshold_ms)
+        
+        # Calculate p95 Latency 
+        # (The value where 95% of the data is lower, 5% is higher)
+        latencies_sorted = sorted(latencies)
+        p95_index = int(0.95 * len(latencies_sorted))
+        
+        # If the index is out of bounds, grab the last one
+        if p95_index >= len(latencies_sorted):
+            p95_index = len(latencies_sorted) - 1
+            
+        p95_latency = latencies_sorted[p95_index]
+        
+        # Save to our results dictionary
+        results[target_region] = {
+            "avg_latency": avg_latency,
+            "p95_latency": p95_latency,
+            "avg_uptime": avg_uptime,
+            "breaches": breaches
         }
-
-    return JSONResponse(
-        content=result,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "*"
-        }
-    )
+        
+    return results
