@@ -1,73 +1,96 @@
-# api/index.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import json
 import os
+import traceback
 
 app = FastAPI()
 
-# ─── CORS ────────────────────────────────────────────────────────────────────
-# This allows any website (dashboards, etc.) to call your endpoint
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # any origin
-    allow_methods=["*"],      # GET, POST, etc.
+    allow_origins=["*"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── Load telemetry data once at startup ─────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(__file__), "latency_data.json")
-with open(DATA_PATH) as f:
-    TELEMETRY = json.load(f)
+# ── Load data (tries both api/ and root folder, and both filenames) ───────────
+TELEMETRY = []
+LOAD_ERROR = None
 
-# ─── What the incoming request looks like ────────────────────────────────────
+for candidate in [
+    os.path.join(os.path.dirname(__file__), "latency_data.json"),
+    os.path.join(os.path.dirname(__file__), "q-vercel-latency.json"),
+    os.path.join(os.path.dirname(__file__), "..", "latency_data.json"),
+    os.path.join(os.path.dirname(__file__), "..", "q-vercel-latency.json"),
+]:
+    try:
+        with open(candidate) as f:
+            TELEMETRY = json.load(f)
+        break
+    except FileNotFoundError:
+        continue
+    except Exception as e:
+        LOAD_ERROR = str(e)
+        break
+
+if not TELEMETRY and LOAD_ERROR is None:
+    LOAD_ERROR = "JSON file not found in api/ or root folder"
+
+# ── Request schema ────────────────────────────────────────────────────────────
 class AnalyticsRequest(BaseModel):
     regions: List[str]
     threshold_ms: float
 
-# ─── Helper: 95th percentile (no numpy needed) ───────────────────────────────
+# ── 95th percentile (no numpy needed) ────────────────────────────────────────
 def percentile_95(data: list) -> float:
     if not data:
         return 0.0
-    sorted_data = sorted(data)
-    n = len(sorted_data)
-    # Linear interpolation method (same as numpy's default)
+    s = sorted(data)
+    n = len(s)
     index = 0.95 * (n - 1)
-    lower = int(index)
-    upper = lower + 1
-    if upper >= n:
-        return float(sorted_data[-1])
-    frac = index - lower
-    return sorted_data[lower] + frac * (sorted_data[upper] - sorted_data[lower])
+    lo = int(index)
+    hi = lo + 1
+    if hi >= n:
+        return float(s[-1])
+    return s[lo] + (index - lo) * (s[hi] - s[lo])
 
-# ─── The actual endpoint ──────────────────────────────────────────────────────
+# ── Main endpoint ─────────────────────────────────────────────────────────────
 @app.post("/")
 def analytics(req: AnalyticsRequest):
-    result = {}
-
-    for region in req.regions:
-        # Filter records for this region
-        records = [r for r in TELEMETRY if r["region"] == region]
-
-        if not records:
+    if LOAD_ERROR:
+        return {"DEBUG_ERROR": LOAD_ERROR}
+    try:
+        result = {}
+        for region in req.regions:
+            records = [r for r in TELEMETRY if r["region"] == region]
+            if not records:
+                result[region] = {
+                    "avg_latency": None,
+                    "p95_latency": None,
+                    "avg_uptime":  None,
+                    "breaches":    0,
+                }
+                continue
+            latencies = [r["latency_ms"] for r in records]
+            uptimes   = [r["uptime"]     for r in records]
             result[region] = {
-                "avg_latency": None,
-                "p95_latency": None,
-                "avg_uptime": None,
-                "breaches": 0,
+                "avg_latency": round(sum(latencies) / len(latencies), 4),
+                "p95_latency": round(percentile_95(latencies), 4),
+                "avg_uptime":  round(sum(uptimes)   / len(uptimes),   4),
+                "breaches":    sum(1 for l in latencies if l > req.threshold_ms),
             }
-            continue
+        return result
+    except Exception as e:
+        return {"DEBUG_ERROR": str(e), "trace": traceback.format_exc()}
 
-        latencies = [r["latency_ms"] for r in records]
-        uptimes   = [r["uptime"]     for r in records]
-
-        result[region] = {
-            "avg_latency": round(sum(latencies) / len(latencies), 4),
-            "p95_latency": round(percentile_95(latencies), 4),
-            "avg_uptime":  round(sum(uptimes) / len(uptimes), 4),
-            "breaches":    sum(1 for l in latencies if l > req.threshold_ms),
-        }
-
-    return result
+# ── Health check (GET) — shows what loaded & a sample record ─────────────────
+@app.get("/")
+def health():
+    return {
+        "status":         "ok" if not LOAD_ERROR else "error",
+        "records_loaded": len(TELEMETRY),
+        "load_error":     LOAD_ERROR,
+        "sample_record":  TELEMETRY[0] if TELEMETRY else None,
+    }
