@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import json
@@ -10,8 +10,9 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST"],
-    allow_headers=["*"]
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Load dataset
@@ -26,8 +27,23 @@ def health():
     return {"status": "ok"}
 
 
+# Handle browser preflight requests
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    response = Response(status_code=200)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 @app.post("/")
-def analyze(payload: dict):
+def analyze(payload: dict, response: Response):
+
+    # Explicit CORS headers
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
 
     regions = payload.get("regions", [])
     threshold = payload.get("threshold_ms", 180)
@@ -58,9 +74,8 @@ def analyze(payload: dict):
             "p95_latency": round(float(np.percentile(latencies, 95)), 2),
             "avg_uptime": round(float(np.mean(uptimes)), 3),
             "breaches": sum(
-                1
-                for x in latencies
-                if x > threshold
+                1 for latency in latencies
+                if latency > threshold
             )
         }
 
