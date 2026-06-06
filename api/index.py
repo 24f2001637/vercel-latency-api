@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -15,7 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Load data (tries both api/ and root folder, and both filenames) ───────────
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
+
+# ── Load data ─────────────────────────────────────────────────────────────────
 TELEMETRY = []
 LOAD_ERROR = None
 
@@ -38,12 +45,12 @@ for candidate in [
 if not TELEMETRY and LOAD_ERROR is None:
     LOAD_ERROR = "JSON file not found in api/ or root folder"
 
-# ── Request schema ────────────────────────────────────────────────────────────
+# ── Schema ────────────────────────────────────────────────────────────────────
 class AnalyticsRequest(BaseModel):
     regions: List[str]
     threshold_ms: float
 
-# ── 95th percentile (no numpy needed) ────────────────────────────────────────
+# ── P95 helper ────────────────────────────────────────────────────────────────
 def percentile_95(data: list) -> float:
     if not data:
         return 0.0
@@ -56,21 +63,24 @@ def percentile_95(data: list) -> float:
         return float(s[-1])
     return s[lo] + (index - lo) * (s[hi] - s[lo])
 
-# ── Main endpoint ─────────────────────────────────────────────────────────────
+# ── Preflight handler ─────────────────────────────────────────────────────────
+@app.options("/")
+def preflight():
+    return JSONResponse(content={}, headers=CORS_HEADERS)
+
+# ── POST endpoint ─────────────────────────────────────────────────────────────
 @app.post("/")
 def analytics(req: AnalyticsRequest):
     if LOAD_ERROR:
-        return {"DEBUG_ERROR": LOAD_ERROR}
+        return JSONResponse(content={"DEBUG_ERROR": LOAD_ERROR}, headers=CORS_HEADERS)
     try:
         result = {}
         for region in req.regions:
             records = [r for r in TELEMETRY if r["region"] == region]
             if not records:
                 result[region] = {
-                    "avg_latency": None,
-                    "p95_latency": None,
-                    "avg_uptime":  None,
-                    "breaches":    0,
+                    "avg_latency": None, "p95_latency": None,
+                    "avg_uptime":  None, "breaches":    0,
                 }
                 continue
             latencies = [r["latency_ms"] for r in records]
@@ -81,16 +91,19 @@ def analytics(req: AnalyticsRequest):
                 "avg_uptime":  round(sum(uptimes)   / len(uptimes),   4),
                 "breaches":    sum(1 for l in latencies if l > req.threshold_ms),
             }
-        return result
+        return JSONResponse(content=result, headers=CORS_HEADERS)
     except Exception as e:
-        return {"DEBUG_ERROR": str(e), "trace": traceback.format_exc()}
+        return JSONResponse(
+            content={"DEBUG_ERROR": str(e), "trace": traceback.format_exc()},
+            headers=CORS_HEADERS
+        )
 
-# ── Health check (GET) — shows what loaded & a sample record ─────────────────
+# ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/")
 def health():
-    return {
+    return JSONResponse(content={
         "status":         "ok" if not LOAD_ERROR else "error",
         "records_loaded": len(TELEMETRY),
         "load_error":     LOAD_ERROR,
         "sample_record":  TELEMETRY[0] if TELEMETRY else None,
-    }
+    }, headers=CORS_HEADERS)
